@@ -126,3 +126,6 @@ dmypy.json
 
 # Cython debug symbols
 cython_debug/
+
+# Image Diff Tool Cache
+.image_diff_cache/

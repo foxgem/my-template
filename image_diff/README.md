@@ -86,6 +86,17 @@ The default model is `google/vit-base-patch16-224-in21k`. You can use other mode
 
 When you use a new model name from Hugging Face Hub for the first time, the tool will download the model weights and configuration. This may take some time depending on the model size and your internet connection. Subsequent uses of the same model will load it from the local cache.
 
+### Performance Considerations & Model Choice
+
+The default model (`google/vit-base-patch16-224-in21k`) provides a good balance of accuracy and performance. However, if you need faster processing, especially for a large number of images, consider the following:
+
+*   **Patch Size:** Vision Transformer (ViT) models with larger patch sizes (e.g., `google/vit-base-patch32-224`) can sometimes be faster as they result in shorter sequence lengths for the transformer, at a potential slight cost to fine-grained accuracy.
+*   **Smaller Architectures:** Models specifically designed for efficiency, such as MobileViT (e.g., `apple/mobilevit-small`) or other lightweight architectures available on Hugging Face Hub, can offer significant speed improvements. These models might have different embedding characteristics, so the optimal similarity threshold could vary.
+*   **Hardware:** Using a GPU (`cuda` device) will dramatically speed up model inference compared to a CPU. The tool will automatically try to use a GPU if PyTorch detects one.
+*   **Experimentation:** The best model depends on your specific dataset and requirements for speed versus similarity precision. You might need to experiment with a few options and adjust the `--threshold` accordingly.
+
+When choosing a different model, ensure it's compatible with `AutoModel` and `AutoImageProcessor` for image feature extraction tasks.
+
 ### Running Tests
 
 To run the unit tests:

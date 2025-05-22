@@ -1,41 +1,39 @@
 import torch
-from transformers import AutoModel
+from transformers import AutoModel # Keep for type hinting if desired, but not used for loading
 import torch.nn.functional as F
 
-def get_image_embedding(processed_image_tensor, model_name_or_path: str):
+def get_image_embeddings(batch_pixel_values, model, device):
     """
-    Generates an embedding for a preprocessed image using a Hugging Face model.
+    Generates embeddings for a batch of preprocessed images using a pre-loaded Hugging Face model.
 
     Args:
-        processed_image_tensor: The tensor output from preprocess_image (pixel_values).
-        model_name_or_path: The name or path of the Hugging Face model.
+        batch_pixel_values: A tensor of shape (batch_size, num_channels, height, width)
+                            containing the preprocessed image data.
+        model: An initialized and loaded Hugging Face AutoModel instance, already in eval()
+               mode and on the correct device.
+        device: The torch.device to which the batch_pixel_values should be moved.
 
     Returns:
-        A torch.Tensor representing the image embedding.
+        A torch.Tensor representing the batch of image embeddings, moved to CPU.
+        Shape: (batch_size, embedding_dimension).
     """
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
     try:
-        model = AutoModel.from_pretrained(model_name_or_path)
-        model.eval()
-        model.to(device)
-
-        processed_image_tensor = processed_image_tensor.to(device)
-
+        batch_pixel_values = batch_pixel_values.to(device)
         with torch.no_grad():
-            outputs = model(processed_image_tensor)
+            outputs = model(batch_pixel_values)
 
         # Try to get pooler_output, otherwise use last_hidden_state's CLS token
         if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:
-            embedding = outputs.pooler_output
+            embeddings = outputs.pooler_output
         else:
-            embedding = outputs.last_hidden_state[:, 0, :]
+            # Assuming CLS token is at index 0 of the sequence for each item in the batch
+            embeddings = outputs.last_hidden_state[:, 0, :] 
         
-        return embedding.cpu() # Return embedding on CPU
+        return embeddings.cpu() # Return batch of embeddings on CPU
 
     except Exception as e:
         # Broad exception for now, can be refined
-        raise RuntimeError(f"Error generating embedding with model {model_name_or_path}: {e}")
+        raise RuntimeError(f"Error generating embeddings from batch: {e}")
 
 def calculate_similarity(embedding1: torch.Tensor, embedding2: torch.Tensor) -> float:
     """

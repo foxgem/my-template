@@ -7,7 +7,10 @@ import torch
 import sys
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from image_diff.image_utils import load_image, preprocess_image
+from unittest.mock import MagicMock
+import transformers # For MagicMock spec
+
+from image_diff.image_utils import load_image, preprocess_image, preprocess_image_batch
 
 class TestImageUtils(unittest.TestCase):
 
@@ -17,20 +20,25 @@ class TestImageUtils(unittest.TestCase):
         self.img2_path = os.path.join(self.sample_images_dir, 'img2.jpg')
         self.not_image_path = os.path.join(self.sample_images_dir, 'not_an_image.txt')
         self.non_existent_path = os.path.join(self.sample_images_dir, 'non_existent.png')
-        self.default_model_name = 'google/vit-base-patch16-224-in21k'
         
+        # Mock AutoImageProcessor
+        self.mock_processor = MagicMock(spec=transformers.AutoImageProcessor)
+
         # For tests that need a valid image, we'll have to skip or expect failure
         # since we can only create empty files as placeholders.
-        # We'll try to load one for preprocess_image, expecting it to fail gracefully
-        # if the file is empty.
         try:
             self.pil_image_for_preprocessing = load_image(self.img1_path)
         except Exception:
             self.pil_image_for_preprocessing = None # Mark that loading failed
+            # If loading the placeholder fails, create a dummy PIL image for tests that need one
+            if self.pil_image_for_preprocessing is None:
+                self.pil_image_for_preprocessing = Image.new('RGB', (10, 10))
+
 
     def test_load_image_png(self):
-        # This test will likely fail because img1.png is an empty file.
+        # This test will likely fail if img1.png is an empty file.
         # A real PNG would be loaded and converted to RGB.
+        # If the placeholder image cannot be loaded, this test will use a dummy image.
         try:
             img = load_image(self.img1_path)
             self.assertIsInstance(img, Image.Image)
@@ -64,31 +72,43 @@ class TestImageUtils(unittest.TestCase):
             load_image(self.not_image_path)
 
     def test_preprocess_image_valid(self):
-        if self.pil_image_for_preprocessing is None:
-            self.skipTest("Skipping preprocess_image test: placeholder image could not be loaded.")
-        
-        # This test will likely fail if the image is empty/invalid,
-        # or if the model cannot be downloaded by the test environment.
-        try:
-            # preprocess_image returns the tensor of pixel_values directly
-            processed_tensor = preprocess_image(self.pil_image_for_preprocessing, self.default_model_name)
-            self.assertIsInstance(processed_tensor, torch.Tensor)
-            self.assertEqual(processed_tensor.ndim, 4) # Batch, Channels, Height, Width
-        except RuntimeError as e:
-            if "Error preprocessing image" in str(e) or "Could not load image" in str(e):
-                 self.skipTest(f"Skipping preprocess_image_valid due to runtime error (likely model or image issue): {e}")
-            else:
-                raise
-        except OSError as e: # Model download issues often manifest as OSError
-            self.skipTest(f"Skipping preprocess_image_valid due to OSError (likely model download issue): {e}")
+        # Configure mock_processor for a single image
+        # preprocess_image expects processor(images=image, return_tensors='pt').pixel_values
+        expected_output_tensor = torch.randn(1, 3, 224, 224)
+        self.mock_processor.return_value = MagicMock(pixel_values=expected_output_tensor)
+
+        # Use the dummy image if placeholder loading failed
+        image_to_test = self.pil_image_for_preprocessing
+        if image_to_test is None: # Should be handled by setUp, but as a safeguard
+             image_to_test = Image.new('RGB', (10,10))
 
 
-    def test_preprocess_image_invalid_model(self):
-        # Create a dummy PIL image if loading failed, as preprocess_image needs an Image object.
-        dummy_image = self.pil_image_for_preprocessing if self.pil_image_for_preprocessing else Image.new('RGB', (10, 10))
+        processed_tensor = preprocess_image(image_to_test, self.mock_processor)
         
-        with self.assertRaises(OSError): # Transformers typically raises OSError for invalid model names
-            preprocess_image(dummy_image, 'invalid/model-name-that-does-not-exist')
+        self.mock_processor.assert_called_once_with(images=image_to_test, return_tensors='pt')
+        self.assertIsInstance(processed_tensor, torch.Tensor)
+        self.assertEqual(processed_tensor.ndim, 4) # Batch, Channels, Height, Width
+        self.assertEqual(processed_tensor.shape[0], 1) # Batch size of 1
+        self.assertTrue(torch.equal(processed_tensor, expected_output_tensor))
+
+    def test_preprocess_image_batch_valid(self):
+        dummy_images_list = [
+            Image.new('RGB', (10, 10)),
+            Image.new('RGB', (12, 12))
+        ]
+        batch_size = len(dummy_images_list)
+        
+        # Configure mock_processor for a batch of images
+        expected_batch_tensor = torch.randn(batch_size, 3, 224, 224)
+        self.mock_processor.return_value = MagicMock(pixel_values=expected_batch_tensor)
+
+        output_tensor = preprocess_image_batch(dummy_images_list, self.mock_processor)
+
+        self.mock_processor.assert_called_once_with(images=dummy_images_list, return_tensors='pt')
+        self.assertIsInstance(output_tensor, torch.Tensor)
+        self.assertEqual(output_tensor.ndim, 4) # Batch, Channels, Height, Width
+        self.assertEqual(output_tensor.shape[0], batch_size)
+        self.assertTrue(torch.equal(output_tensor, expected_batch_tensor))
 
 if __name__ == '__main__':
     unittest.main()
