@@ -11,36 +11,45 @@ A command-line tool to find similar images within a folder. It compares images p
 *   Adjustable similarity threshold.
 
 ## Requirements
-*   Python 3.7+
-*   Libraries listed in `requirements.txt`. These can be installed using pip:
-    ```bash
-    pip install -r requirements.txt
-    ```
+*   Python 3.8+ and `uv` (recommended, for environment and package management).
 
 ## Installation
-1.  Clone the repository or download and extract the source code.
+
+1.  **Install `uv` (if you haven't already):**
+    Follow the official instructions at [astral.sh/docs/uv#installation](https://astral.sh/docs/uv#installation) or use pipx/pip:
     ```bash
-    git clone <repository_url> # Replace <repository_url> with the actual URL
-    cd image_diff
+    # Using pipx (recommended for CLI tools)
+    pipx install uv
+    # Or using pip
+    pip install uv
     ```
-2.  Install the required packages:
+
+2.  **Clone the repository (or download source):**
     ```bash
-    pip install -r requirements.txt
+    git clone <repository_url> # Replace with actual URL
+    cd image-diff-tool 
     ```
-    *   **Note on PyTorch Installation:** The `requirements.txt` file includes `torch`. If you need a specific version of PyTorch (e.g., with a particular CUDA toolkit support), you might want to install it separately first. For example:
-        ```bash
-        # Example for PyTorch with CUDA 11.8 support
-        # pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
-        # Then run: pip install -r requirements.txt
-        ```
-        Refer to the [official PyTorch installation guide](https://pytorch.org/get-started/locally/) for more options.
+    *(Note: The directory name might be `image_diff` or `image-diff-tool`. The `pyproject.toml` uses `image-diff-tool` as the project name. Ensure you are in the project root directory).*
+
+3.  **Create a virtual environment and install dependencies:**
+    ```bash
+    # Create a virtual environment
+    uv venv
+    # Activate the environment (uv automatically detects it in the current directory)
+    # On Windows: .\.venv\Scriptsctivate
+    # On macOS/Linux: source .venv/bin/activate
+    # Note: With uv, direct activation is often not needed if you prefix commands with `uv run`.
+
+    # Install the package and its dependencies
+    uv pip install .
+    ```
 
 ## Usage
-The tool is run from the command line using the `image_diff` module.
 
-Basic command structure:
+After installation, the tool will be available as `image-diff` in your environment.
+
 ```bash
-python -m image_diff <folder_path> [options]
+image-diff <folder_path> [options]
 ```
 
 ### Arguments
@@ -51,17 +60,17 @@ python -m image_diff <folder_path> [options]
 ### Examples
 1.  Compare images in a folder named `my_images` using default settings:
     ```bash
-    python -m image_diff ./my_images
+    image-diff ./my_images
     ```
 
 2.  Compare images in `my_images` with a custom similarity threshold of `0.85`:
     ```bash
-    python -m image_diff ./my_images --threshold 0.85
+    image-diff ./my_images --threshold 0.85
     ```
 
 3.  Compare images in `my_images` using a different model, for example, `facebook/dinov2-base`:
     ```bash
-    python -m image_diff ./my_images --model_name 'facebook/dinov2-base'
+    image-diff ./my_images --model_name 'facebook/dinov2-base'
     ```
 
 ## How it Works
@@ -76,3 +85,12 @@ python -m image_diff <folder_path> [options]
 The default model is `google/vit-base-patch16-224-in21k`. You can use other models from the Hugging Face Hub that are suitable for image feature extraction (e.g., other Vision Transformer (ViT) variants, DeiT, DINOv2, etc.). Ensure the chosen model is compatible with `AutoModel` and `AutoImageProcessor` from the `transformers` library for image feature extraction tasks.
 
 When you use a new model name from Hugging Face Hub for the first time, the tool will download the model weights and configuration. This may take some time depending on the model size and your internet connection. Subsequent uses of the same model will load it from the local cache.
+
+### Running Tests
+
+To run the unit tests:
+```bash
+# Ensure development dependencies (if any were defined as such) are installed
+# For this project, tests run with the main dependencies
+uv run python -m unittest discover tests -p 'test_*.py'
+```

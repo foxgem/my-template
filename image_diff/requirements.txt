@@ -1,4 +1,0 @@
-transformers
-Pillow
-torch
-scikit-learn

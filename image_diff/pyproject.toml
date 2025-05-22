@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "image-diff-tool"
+version = "0.1.0"
+authors = [
+  { name="Jules", email="jules@example.com" }, # Replace with appropriate author info if available
+]
+description = "A command-line tool to find similar images within a folder using vision transformer models."
+readme = "README.md"
+requires-python = ">=3.8"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", # Assuming MIT, update if different
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+    "Environment :: Console",
+]
+dependencies = [
+    "transformers",
+    "Pillow",
+    "torch",
+    "scikit-learn",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/example/image-diff" # Replace with actual URL if available
+"Bug Tracker" = "https://github.com/example/image-diff/issues" # Replace with actual URL if available
+
+[project.scripts]
+image-diff = "image_diff.cli:main"
