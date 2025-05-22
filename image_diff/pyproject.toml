@@ -23,6 +23,8 @@ dependencies = [
     "Pillow",
     "torch",
     "scikit-learn",
+    "lancedb",
+    "pyarrow",
 ]
 
 [project.urls]

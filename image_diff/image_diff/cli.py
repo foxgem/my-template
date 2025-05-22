@@ -5,35 +5,14 @@ from PIL import UnidentifiedImageError
 import torch
 from transformers import AutoImageProcessor, AutoModel
 import hashlib
-import pathlib
+import lancedb
+import pyarrow as pa
+import json # For JSON output
+import csv # For CSV output
 
 # Local package imports
 from .image_utils import load_image, preprocess_image_batch
 from .similarity import get_image_embeddings, calculate_similarity
-
-# Cache Helper Functions
-CACHE_DIR = pathlib.Path(".image_diff_cache")
-
-def get_cache_filepath(model_name: str) -> pathlib.Path:
-    safe_model_name = hashlib.md5(model_name.encode()).hexdigest()
-    return CACHE_DIR / f"embeddings_cache_{safe_model_name}.pt"
-
-def load_embedding_cache(cache_filepath: pathlib.Path) -> dict:
-    if cache_filepath.exists():
-        try:
-            # Ensure tensors are loaded to CPU by default with torch.load
-            return torch.load(cache_filepath, map_location=torch.device('cpu'))
-        except Exception as e:
-            print(f"Warning: Could not load cache file {cache_filepath}: {e}")
-    return {}
-
-def save_embedding_cache(cache_filepath: pathlib.Path, cache_data: dict):
-    try:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        torch.save(cache_data, cache_filepath)
-        print(f"Embeddings cache saved to {cache_filepath}")
-    except Exception as e:
-        print(f"Warning: Could not save cache file {cache_filepath}: {e}")
 
 def main():
     parser = argparse.ArgumentParser(description="Compares images in a folder and reports similar pairs.")
@@ -49,6 +28,12 @@ def main():
         type=str,
         default="google/vit-base-patch16-224-in21k",
         help="Hugging Face model name or path to a local model for feature extraction. Default: 'google/vit-base-patch16-224-in21k'",
+    )
+    parser.add_argument(
+        "--output_file",
+        type=str,
+        default="similar_pairs.csv", # Default to CSV
+        help="Path to save the results of similar pairs. E.g., similar_pairs.csv or similar_pairs.json",
     )
     args = parser.parse_args()
 
@@ -88,141 +73,177 @@ def main():
         print(f"Error loading model or processor '{args.model_name}': {e}. Check model name or network connection.")
         return
 
-    # Initialization for Caching and Processing
-    cache_filepath = get_cache_filepath(args.model_name)
-    embedding_cache = load_embedding_cache(cache_filepath)
-    current_run_embeddings = {} # Stores img_path: {'mtime': mtime, 'embedding': tensor} for this run
-    
+    # LanceDB Initialization
+    db_uri = os.path.join(args.folder_path, ".lancedb")
+    db = lancedb.connect(db_uri)
+    safe_model_name_part = hashlib.md5(args.model_name.encode()).hexdigest()[:12]
+    table_name = f"image_embeddings_{safe_model_name_part}"
+    tbl = None
+    try:
+        tbl = db.open_table(table_name)
+        print(f"Opened existing LanceDB table: {table_name} at {db_uri}")
+    except FileNotFoundError: # LanceDB raises FileNotFoundError if table doesn't exist
+        print(f"LanceDB table '{table_name}' not found. Will be created if new embeddings are generated.")
+    except Exception as e: # Catch other potential lancedb errors during open
+        print(f"Error opening LanceDB table '{table_name}': {e}. Proceeding as if table needs creation.")
+
+    embedding_dim = model.config.hidden_size # Get embedding dimension
+
+    # Image Scanning and Embedding Update
     paths_for_computation = []
     pils_for_computation = []
-    # Pre-allocate list to store final embeddings in order of original image_paths
-    ordered_embeddings_list = [None] * len(image_paths)
-    
-    valid_image_paths_for_comparison = [] # Paths that are valid and will be part of comparison
-    valid_image_indices_map = {} # Map original index to new index in valid_image_paths_for_comparison
+    # Dict to store all data: path -> {'mtime': mtime, 'embedding': tensor, 'basename': basename}
+    processed_image_data = {} 
 
-    print(f"\nProcessing {len(image_paths)} images (checking cache, loading, and preparing for embedding)...")
-    for original_idx, img_path in enumerate(image_paths):
+    print(f"\nProcessing {len(image_paths)} images (checking LanceDB, loading, and preparing for embedding)...")
+    for img_path in image_paths:
+        basename = os.path.basename(img_path)
         try:
             current_mtime = os.path.getmtime(img_path)
-            pil_image = load_image(img_path) # Load PIL image early
-        except (FileNotFoundError, IOError, UnidentifiedImageError) as e:
-            print(f"Warning: Skipping image {os.path.basename(img_path)} due to error: {e}")
-            ordered_embeddings_list[original_idx] = None # Mark as unusable
+        except FileNotFoundError:
+            print(f"Warning: File {basename} not found during mtime check. Skipping.")
             continue
+        
+        found_in_db = False
+        if tbl:
+            try:
+                results = tbl.search().where(f"image_path = '{basename}'").limit(1).to_list()
+                if results and results[0]['mtime'] == current_mtime:
+                    print(f"Using embedding from LanceDB for {basename}")
+                    embedding = torch.tensor(results[0]['embedding']).cpu()
+                    processed_image_data[img_path] = {'mtime': current_mtime, 'embedding': embedding, 'basename': basename}
+                    found_in_db = True
+            except Exception as e:
+                print(f"Warning: Error querying LanceDB for {basename}: {e}. Will attempt to recompute.")
 
-        # Cache check
-        if img_path in embedding_cache and embedding_cache[img_path]['mtime'] == current_mtime:
-            print(f"Using cached embedding for {os.path.basename(img_path)}")
-            cached_data = embedding_cache[img_path]
-            ordered_embeddings_list[original_idx] = cached_data['embedding'].cpu() # Ensure CPU
-            current_run_embeddings[img_path] = cached_data # Add to current run for potential re-save
-        else:
-            paths_for_computation.append(img_path)
-            pils_for_computation.append(pil_image)
-            ordered_embeddings_list[original_idx] = "COMPUTE_PENDING" # Mark for computation
-
-        # If image is usable (either from cache or will be computed)
-        # This check might seem redundant if errors above 'continue', but kept for clarity
-        if ordered_embeddings_list[original_idx] is not None:
-             valid_image_indices_map[original_idx] = len(valid_image_paths_for_comparison)
-             valid_image_paths_for_comparison.append(img_path)
+        if not found_in_db:
+            try:
+                pil_image = load_image(img_path)
+                paths_for_computation.append(img_path)
+                pils_for_computation.append(pil_image)
+            except (IOError, UnidentifiedImageError) as e:
+                print(f"Warning: Skipping image {basename} due to loading error: {e}")
+            except Exception as e:
+                 print(f"Warning: Unexpected error loading {basename}: {e}. Skipping.")
 
 
-    # Batch Preprocessing & Inference for paths_for_computation
+    # Batch Computation & LanceDB Update
     if pils_for_computation:
         print(f"\nPreprocessing {len(pils_for_computation)} images and generating new embeddings...")
         try:
             batched_pixel_values = preprocess_image_batch(pils_for_computation, processor)
             computed_embeddings_batch = get_image_embeddings(batched_pixel_values, model, device)
             
-            computed_idx = 0
-            for original_idx, item_status in enumerate(ordered_embeddings_list):
-                if item_status == "COMPUTE_PENDING":
-                    img_path_being_filled = image_paths[original_idx]
-                    embedding_tensor = computed_embeddings_batch[computed_idx].cpu()
-                    ordered_embeddings_list[original_idx] = embedding_tensor
-                    current_mtime = os.path.getmtime(img_path_being_filled) # Re-get mtime
-                    current_run_embeddings[img_path_being_filled] = {'mtime': current_mtime, 'embedding': embedding_tensor}
-                    computed_idx += 1
-            print("New embeddings generated successfully.")
+            data_to_add_to_lancedb = []
+            for idx, img_path_comp in enumerate(paths_for_computation):
+                basename_comp = os.path.basename(img_path_comp)
+                embedding_tensor = computed_embeddings_batch[idx].cpu()
+                try:
+                    mtime_comp = os.path.getmtime(img_path_comp)
+                    processed_image_data[img_path_comp] = {'mtime': mtime_comp, 'embedding': embedding_tensor, 'basename': basename_comp}
+                    data_to_add_to_lancedb.append({
+                        'image_path': basename_comp, 
+                        'mtime': mtime_comp, 
+                        'embedding': embedding_tensor.tolist() # Convert tensor to list for LanceDB
+                    })
+                except FileNotFoundError:
+                     print(f"Warning: File {basename_comp} not found during mtime re-check for LanceDB add. Skipping this file.")
+
+
+            if data_to_add_to_lancedb:
+                if tbl is None:
+                    schema = pa.schema([
+                        pa.field("image_path", pa.string()),
+                        pa.field("mtime", pa.float64()),
+                        pa.field("embedding", pa.list_(pa.float32(), list_size=embedding_dim))
+                    ])
+                    try:
+                        tbl = db.create_table(table_name, schema=schema)
+                        print(f"Created LanceDB table: {table_name}")
+                    except Exception as e:
+                        print(f"Failed to create table {table_name} (it might already exist or schema mismatch): {e}")
+                        try:
+                            tbl = db.open_table(table_name) # Try opening again
+                        except Exception as e_open:
+                            print(f"Fatal: Could not create or open LanceDB table {table_name}: {e_open}")
+                            return
+                
+                if tbl: # Ensure table is usable
+                    try:
+                        # Delete old entries for images being updated
+                        for item_to_add in data_to_add_to_lancedb:
+                            tbl.delete(f"image_path = '{item_to_add['image_path']}'")
+                        
+                        tbl.add(data_to_add_to_lancedb)
+                        print(f"Added/updated {len(data_to_add_to_lancedb)} embeddings in LanceDB.")
+                    except Exception as e:
+                        print(f"Error updating LanceDB table {table_name}: {e}")
+
         except RuntimeError as e:
             print(f"Error during batch processing or embedding generation for new images: {e}")
-            # Note: Images that failed here won't be in current_run_embeddings, so won't be cached.
-            # ordered_embeddings_list items will remain "COMPUTE_PENDING" or None for these.
-            # We need to filter them out before torch.stack
         except Exception as e:
             print(f"An unexpected error occurred during batch processing for new images: {e}")
-            # Similar handling as above
     else:
-        print("\nNo new embeddings to compute. All usable images were cached or processed.")
+        print("\nNo new embeddings to compute. All usable images were found in LanceDB or processed.")
 
-    # Final all_embeddings Preparation
-    final_embeddings_for_comparison = [
-        emb for emb in ordered_embeddings_list 
-        if emb is not None and isinstance(emb, torch.Tensor)
-    ]
-
-    if len(final_embeddings_for_comparison) < 2:
-        print(f"\nNot enough valid embeddings ({len(final_embeddings_for_comparison)}) available for comparison. Exiting.")
-        # Save any newly computed or re-validated cache entries
-        embedding_cache.update(current_run_embeddings)
-        save_embedding_cache(cache_filepath, embedding_cache)
-        return
-
-    all_embeddings = torch.stack(final_embeddings_for_comparison)
-    
-    # Rebuild valid_image_paths_for_comparison based on successfully processed embeddings
-    # This is important if some "COMPUTE_PENDING" images failed during batch processing
-    valid_image_paths_for_comparison = []
-    temp_valid_indices_map = {}
-    new_idx = 0
-    for original_idx, item_status in enumerate(ordered_embeddings_list):
-        if isinstance(item_status, torch.Tensor): # Only successfully processed/cached images
-            valid_image_paths_for_comparison.append(image_paths[original_idx])
-            temp_valid_indices_map[original_idx] = new_idx
-            new_idx +=1
-    # The valid_image_indices_map is not directly used in comparison loop below, but good for consistency
-
+    # Prepare for Comparison
+    valid_image_paths_for_comparison = list(processed_image_data.keys())
     if len(valid_image_paths_for_comparison) < 2:
-         print(f"\nNot enough valid images ({len(valid_image_paths_for_comparison)}) after processing for comparison. Exiting.")
-         embedding_cache.update(current_run_embeddings)
-         save_embedding_cache(cache_filepath, embedding_cache)
-         return
+        print(f"\nNot enough valid embeddings ({len(valid_image_paths_for_comparison)}) available for comparison. Exiting.")
+        return
+    
+    all_embeddings_list = [processed_image_data[path]['embedding'] for path in valid_image_paths_for_comparison]
+    all_embeddings = torch.stack(all_embeddings_list)
 
     # Similarity Calculation Loop
     similar_pairs_found = 0
+    similar_pairs_data = [] # For storing output
     print("\nCalculating similarities and comparing pairs...")
-    # Iterate over indices of the 'all_embeddings' tensor, which corresponds to 'valid_image_paths_for_comparison'
     for i, j in itertools.combinations(range(len(valid_image_paths_for_comparison)), 2):
         img_path1 = valid_image_paths_for_comparison[i]
         img_path2 = valid_image_paths_for_comparison[j]
         
-        # all_embeddings are already stacked correctly
+        basename1 = processed_image_data[img_path1]['basename']
+        basename2 = processed_image_data[img_path2]['basename']
+        
         embedding1 = all_embeddings[i].unsqueeze(0) 
         embedding2 = all_embeddings[j].unsqueeze(0)
 
         try:
             similarity_score = calculate_similarity(embedding1, embedding2)
-
-            similarity_score = calculate_similarity(embedding1, embedding2)
-
             if similarity_score >= args.threshold:
-                print(f"Found similar pair: {os.path.basename(img_path1)} and {os.path.basename(img_path2)} - Similarity: {similarity_score:.4f}")
+                print(f"Found similar pair: {basename1} and {basename2} - Similarity: {similarity_score:.4f}")
+                similar_pairs_data.append({'image1': basename1, 'image2': basename2, 'similarity': round(similarity_score, 4)})
                 similar_pairs_found += 1
         except RuntimeError as e:
-            print(f"Error calculating similarity for pair ({os.path.basename(img_path1)}, {os.path.basename(img_path2)}): {e}")
+            print(f"Error calculating similarity for pair ({basename1}, {basename2}): {e}")
         except Exception as e:
-            print(f"Unexpected error calculating similarity for pair ({os.path.basename(img_path1)}, {os.path.basename(img_path2)}): {e}")
+            print(f"Unexpected error calculating similarity for pair ({basename1}, {basename2}): {e}")
 
-    if similar_pairs_found == 0:
+    # Save Results to Output File
+    if similar_pairs_data:
+        output_file_path = args.output_file
+        file_ext = os.path.splitext(output_file_path)[1].lower()
+        try:
+            if file_ext == '.csv':
+                with open(output_file_path, 'w', newline='') as f:
+                    writer = csv.DictWriter(f, fieldnames=['image1', 'image2', 'similarity'])
+                    writer.writeheader()
+                    writer.writerows(similar_pairs_data)
+            elif file_ext == '.json':
+                with open(output_file_path, 'w') as f:
+                    json.dump(similar_pairs_data, f, indent=4)
+            else: # Default to .txt
+                with open(output_file_path, 'w') as f:
+                    for pair in similar_pairs_data:
+                        f.write(f"Image 1: {pair['image1']}, Image 2: {pair['image2']}, Similarity: {pair['similarity']}\n")
+            print(f"\nSaved {len(similar_pairs_data)} similar pairs to {output_file_path}")
+        except IOError as e:
+            print(f"Error writing output file {output_file_path}: {e}")
+
+    elif similar_pairs_found == 0 : # Check if any pairs were printed but not added to data (e.g. if data append was skipped)
         print("\nNo pairs found above the similarity threshold.")
-    else:
-        print(f"\nFound {similar_pairs_found} pair(s) above the similarity threshold.")
-
-    # Save updated cache
-    embedding_cache.update(current_run_embeddings)
-    save_embedding_cache(cache_filepath, embedding_cache)
+    # If similar_pairs_data is empty and similar_pairs_found is also 0, it means no pairs were found.
 
 if __name__ == '__main__':
     main()
