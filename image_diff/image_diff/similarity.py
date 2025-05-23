@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModel # Keep for type hinting if desired, but not used for loading
+# AutoModel import removed
 import torch.nn.functional as F
 
 def get_image_embeddings(batch_pixel_values, model, device):

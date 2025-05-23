@@ -10,7 +10,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from unittest.mock import MagicMock
 import transformers # For MagicMock spec
 
-from image_diff.image_utils import load_image, preprocess_image, preprocess_image_batch
+from image_diff.image_utils import load_image, preprocess_image_batch # Removed preprocess_image
 
 class TestImageUtils(unittest.TestCase):
 
@@ -71,25 +71,7 @@ class TestImageUtils(unittest.TestCase):
         with self.assertRaises(IOError): # Changed from PIL.UnidentifiedImageError to IOError
             load_image(self.not_image_path)
 
-    def test_preprocess_image_valid(self):
-        # Configure mock_processor for a single image
-        # preprocess_image expects processor(images=image, return_tensors='pt').pixel_values
-        expected_output_tensor = torch.randn(1, 3, 224, 224)
-        self.mock_processor.return_value = MagicMock(pixel_values=expected_output_tensor)
-
-        # Use the dummy image if placeholder loading failed
-        image_to_test = self.pil_image_for_preprocessing
-        if image_to_test is None: # Should be handled by setUp, but as a safeguard
-             image_to_test = Image.new('RGB', (10,10))
-
-
-        processed_tensor = preprocess_image(image_to_test, self.mock_processor)
-        
-        self.mock_processor.assert_called_once_with(images=image_to_test, return_tensors='pt')
-        self.assertIsInstance(processed_tensor, torch.Tensor)
-        self.assertEqual(processed_tensor.ndim, 4) # Batch, Channels, Height, Width
-        self.assertEqual(processed_tensor.shape[0], 1) # Batch size of 1
-        self.assertTrue(torch.equal(processed_tensor, expected_output_tensor))
+    # test_preprocess_image_valid removed
 
     def test_preprocess_image_batch_valid(self):
         dummy_images_list = [

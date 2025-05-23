@@ -1,5 +1,5 @@
 from PIL import Image, UnidentifiedImageError
-from transformers import AutoImageProcessor
+# AutoImageProcessor import removed
 
 def load_image(image_path: str) -> Image.Image:
     """
@@ -23,23 +23,7 @@ def load_image(image_path: str) -> Image.Image:
     except (IOError, UnidentifiedImageError) as e:
         raise IOError(f"Error opening or reading image file {image_path}: {e}")
 
-def preprocess_image(image: Image.Image, processor):
-    """
-    Preprocesses a single image using a pre-initialized Hugging Face AutoImageProcessor.
-
-    Args:
-        image: A PIL.Image.Image object.
-        processor: An initialized Hugging Face AutoImageProcessor instance.
-
-    Returns:
-        The processed image tensor (pixel_values).
-    """
-    try:
-        processed_output = processor(images=image, return_tensors='pt')
-        return processed_output.pixel_values
-    except Exception as e:
-        # Broad exception for now, can be refined if specific exceptions from transformers are known
-        raise RuntimeError(f"Error during single image preprocessing: {e}")
+# preprocess_image function removed
 
 def preprocess_image_batch(images: list[Image.Image], processor):
     """

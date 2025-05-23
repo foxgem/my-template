@@ -1,7 +1,7 @@
 import argparse
 import os
 import itertools
-from PIL import UnidentifiedImageError
+# UnidentifiedImageError import removed
 import torch
 from transformers import AutoImageProcessor, AutoModel
 import hashlib
@@ -76,8 +76,8 @@ def main():
     # LanceDB Initialization
     db_uri = os.path.join(args.folder_path, ".lancedb")
     db = lancedb.connect(db_uri)
-    safe_model_name_part = hashlib.md5(args.model_name.encode()).hexdigest()[:12]
-    table_name = f"image_embeddings_{safe_model_name_part}"
+    model_hash = hashlib.md5(args.model_name.encode()).hexdigest()[:12]
+    table_name = f"image_embeddings_{model_hash}"
     tbl = None
     try:
         tbl = db.open_table(table_name)
@@ -107,24 +107,36 @@ def main():
         found_in_db = False
         if tbl:
             try:
-                results = tbl.search().where(f"image_path = '{basename}'").limit(1).to_list()
-                if results and results[0]['mtime'] == current_mtime:
-                    print(f"Using embedding from LanceDB for {basename}")
-                    embedding = torch.tensor(results[0]['embedding']).cpu()
-                    processed_image_data[img_path] = {'mtime': current_mtime, 'embedding': embedding, 'basename': basename}
-                    found_in_db = True
+                # Ensure basename is properly escaped for SQL-like WHERE clause if it could contain quotes,
+                # though unlikely for typical file basenames. LanceDB might handle this.
+                query = f"image_path = '{basename}'" 
+                results = tbl.search().where(query).limit(1).to_list()
+
+                if results:
+                    db_mtime = results[0]['mtime']
+                    if db_mtime == current_mtime:
+                        print(f"SUCCESS_CACHE_HIT: Using embedding from LanceDB for {basename} (mtime match: DB={db_mtime}, File={current_mtime})")
+                        embedding = torch.tensor(results[0]['embedding']).cpu()
+                        processed_image_data[img_path] = {'mtime': current_mtime, 'embedding': embedding, 'basename': basename}
+                        found_in_db = True
+                    else:
+                        print(f"INFO_CACHE_MISS: Mtime mismatch for {basename}. DB_mtime={db_mtime}, File_mtime={current_mtime}. Will recompute.")
+                else:
+                    print(f"INFO_CACHE_MISS: {basename} not found in LanceDB table '{table_name}'. Will compute.")
             except Exception as e:
-                print(f"Warning: Error querying LanceDB for {basename}: {e}. Will attempt to recompute.")
+                print(f"WARNING_CACHE_QUERY_ERROR: Error querying LanceDB for {basename}: {e}. Will attempt to recompute.")
+        else: # tbl is None (table does not exist)
+            print(f"INFO_CACHE_MISS: LanceDB table '{table_name}' does not exist. Will compute for {basename}.")
 
         if not found_in_db:
             try:
                 pil_image = load_image(img_path)
                 paths_for_computation.append(img_path)
                 pils_for_computation.append(pil_image)
-            except (IOError, UnidentifiedImageError) as e:
-                print(f"Warning: Skipping image {basename} due to loading error: {e}")
+            except IOError as e: # UnidentifiedImageError is a subclass of IOError
+                print(f"WARNING_IMAGE_LOAD_ERROR: Skipping image {basename} due to loading error: {e}")
             except Exception as e:
-                 print(f"Warning: Unexpected error loading {basename}: {e}. Skipping.")
+                print(f"WARNING_UNEXPECTED_LOAD_ERROR: Unexpected error loading {basename}: {e}. Skipping.")
 
 
     # Batch Computation & LanceDB Update
