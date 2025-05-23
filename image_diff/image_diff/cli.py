@@ -139,6 +139,7 @@ def main():
     try:
         tbl = db.open_table(table_name)
         logger.info(f"SUCCESS_LANCEDB_OPEN: Opened existing LanceDB table: {table_name}")
+        logger.debug(f"Boolean evaluation of opened 'tbl' object: {bool(tbl)}. Type: {type(tbl)}")
     except FileNotFoundError: # LanceDB raises FileNotFoundError if table doesn't exist
         logger.info(f"INFO_LANCEDB_NOT_FOUND: LanceDB table '{table_name}' not found by open_table(). Will attempt to create it if new embeddings are generated.")
     except Exception as e: # Catch other potential lancedb errors during open
@@ -162,7 +163,7 @@ def main():
             continue
         
         found_in_db = False
-        if tbl:
+        if tbl is not None: # Explicit check
             try:
                 # Ensure basename is properly escaped for SQL-like WHERE clause if it could contain quotes,
                 # though unlikely for typical file basenames. LanceDB might handle this.
@@ -182,8 +183,8 @@ def main():
                     logger.debug(f"INFO_CACHE_MISS: {basename} not found in LanceDB table '{table_name}'. Will compute.")
             except Exception as e:
                 logger.warning(f"WARNING_CACHE_QUERY_ERROR: Error querying LanceDB for {basename}: {e}. Will attempt to recompute.")
-        else: # tbl is None (table does not exist)
-            logger.debug(f"INFO_CACHE_MISS: LanceDB table '{table_name}' does not exist. Will compute for {basename}.")
+        else: # tbl is None
+            logger.debug(f"INFO_CACHE_MISS_TABLE_IS_NONE: LanceDB table object 'tbl' is None. Table '{table_name}' likely does not exist or failed to open/create. Will compute for {basename}.")
 
         if not found_in_db:
             try:
@@ -230,16 +231,18 @@ def main():
                         logger.info(f"Attempting to create new LanceDB table '{table_name}' with {len(data_to_add_to_lancedb)} records.")
                         tbl = db.create_table(table_name, schema=schema)
                         logger.info(f"SUCCESS_LANCEDB_CREATE: Created LanceDB table: {table_name}")
+                        logger.debug(f"Boolean evaluation of newly created 'tbl' object: {bool(tbl)}. Type: {type(tbl)}")
                     except Exception as e:
                         logger.warning(f"WARNING_LANCEDB_CREATE_ERROR: Failed to create table {table_name} (it might already exist or schema mismatch): {e}")
                         try:
                             tbl = db.open_table(table_name) # Try opening again
                             logger.info(f"INFO_LANCEDB_REOPEN_SUCCESS: Successfully opened table '{table_name}' after create attempt failed.")
+                            logger.debug(f"Boolean evaluation of re-opened 'tbl' object after failed create: {bool(tbl)}. Type: {type(tbl)}")
                         except Exception as e_open:
                             logger.error(f"FATAL_LANCEDB_REOPEN_ERROR: Could not create or open LanceDB table {table_name}: {e_open}")
                             return
                 
-                if tbl: # Ensure table is usable
+                if tbl is not None: # Ensure table is usable
                     try:
                         # Delete old entries for images being updated
                         for item_to_add in data_to_add_to_lancedb:
