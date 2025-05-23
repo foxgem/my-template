@@ -121,18 +121,28 @@ def main():
         return
 
     # LanceDB Initialization
+    # LanceDB Initialization
     db_uri = os.path.join(args.folder_path, ".lancedb")
     db = lancedb.connect(db_uri)
     model_hash = hashlib.md5(args.model_name.encode()).hexdigest()[:12]
     table_name = f"image_embeddings_{model_hash}"
+    logger.info(f"Using LanceDB URI: {db_uri}") # Early logging
+    logger.info(f"Target LanceDB table name: {table_name}") # Early logging
+
+    try:
+        existing_tables = db.table_names()
+        logger.debug(f"Existing tables in LanceDB at {db_uri}: {existing_tables}")
+    except Exception as e:
+        logger.warning(f"Could not list LanceDB tables at {db_uri}: {e}")
+
     tbl = None
     try:
         tbl = db.open_table(table_name)
-        logger.info(f"Opened existing LanceDB table: {table_name} at {db_uri}")
+        logger.info(f"SUCCESS_LANCEDB_OPEN: Opened existing LanceDB table: {table_name}")
     except FileNotFoundError: # LanceDB raises FileNotFoundError if table doesn't exist
-        logger.info(f"LanceDB table '{table_name}' not found. Will be created if new embeddings are generated.")
+        logger.info(f"INFO_LANCEDB_NOT_FOUND: LanceDB table '{table_name}' not found by open_table(). Will attempt to create it if new embeddings are generated.")
     except Exception as e: # Catch other potential lancedb errors during open
-        logger.warning(f"Error opening LanceDB table '{table_name}': {e}. Proceeding as if table needs creation.")
+        logger.warning(f"WARNING_LANCEDB_OPEN_ERROR: Error opening LanceDB table '{table_name}': {e}. Proceeding as if table needs creation.")
 
     embedding_dim = model.config.hidden_size # Get embedding dimension
 
@@ -217,14 +227,16 @@ def main():
                         pa.field("embedding", pa.list_(pa.float32(), list_size=embedding_dim))
                     ])
                     try:
+                        logger.info(f"Attempting to create new LanceDB table '{table_name}' with {len(data_to_add_to_lancedb)} records.")
                         tbl = db.create_table(table_name, schema=schema)
-                        logger.info(f"Created LanceDB table: {table_name}")
+                        logger.info(f"SUCCESS_LANCEDB_CREATE: Created LanceDB table: {table_name}")
                     except Exception as e:
-                        logger.warning(f"Failed to create table {table_name} (it might already exist or schema mismatch): {e}")
+                        logger.warning(f"WARNING_LANCEDB_CREATE_ERROR: Failed to create table {table_name} (it might already exist or schema mismatch): {e}")
                         try:
                             tbl = db.open_table(table_name) # Try opening again
+                            logger.info(f"INFO_LANCEDB_REOPEN_SUCCESS: Successfully opened table '{table_name}' after create attempt failed.")
                         except Exception as e_open:
-                            logger.error(f"Fatal: Could not create or open LanceDB table {table_name}: {e_open}")
+                            logger.error(f"FATAL_LANCEDB_REOPEN_ERROR: Could not create or open LanceDB table {table_name}: {e_open}")
                             return
                 
                 if tbl: # Ensure table is usable
