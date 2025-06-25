@@ -129,3 +129,5 @@ cython_debug/
 
 # Image Diff Tool Cache
 .image_diff_cache/
+
+similar_pairs.csv

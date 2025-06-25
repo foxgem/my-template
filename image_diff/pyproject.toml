@@ -25,7 +25,7 @@ dependencies = [
     "scikit-learn",
     "lancedb",
     "pyarrow",
-    "mtcnn-pytorch",
+    "facenet-pytorch",
 ]
 
 [project.urls]
