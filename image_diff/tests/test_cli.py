@@ -10,17 +10,13 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 # Import the main function from cli.py
 from image_diff.cli import main as cli_main
 
-class TestCLI(unittest.TestCase):
-
+# These imports were mistakenly placed inside the class or duplicated
 import torch # For creating dummy tensors
-import lancedb # For spec if needed
-import pyarrow as pa # For spec if needed
-import json
-import csv
+# import lancedb # For spec if needed - Already imported via cli module if needed for spec
+# import pyarrow as pa # For spec if needed - Already imported via cli module if needed for spec
+import json # Already imported via cli module if needed for spec, but also used directly in test
+import csv # Already imported via cli module if needed for spec, but also used directly in test
 from unittest.mock import mock_open # For mocking file open
-
-# Import the main function from cli.py
-from image_diff.cli import main as cli_main
 
 class TestCLI(unittest.TestCase):
 
@@ -37,40 +33,62 @@ class TestCLI(unittest.TestCase):
         patch('image_diff.cli.calculate_similarity'),
         patch('image_diff.cli.lancedb.connect'),    # LanceDB related
         patch('image_diff.cli.os.path.getmtime'),   # LanceDB mtime check
-        patch('builtins.open', new_callable=mock_open) # For output file
+        patch('builtins.open', new_callable=mock_open), # For output file
+        patch('image_diff.cli.MTCNN') # Mock MTCNN model loading
     ]
 
     def _apply_mocks(self, func, *args):
+        # The mocks are applied in reverse order of the list
+        # So, the last item in MOCK_DECORATORS is the innermost mock
         for decorator in reversed(self.MOCK_DECORATORS):
             func = decorator(func)
-        return func(*args)
+        return func(*args) # func will now have all mock objects as parameters
 
-    def run_cli_with_args(self, args_list, mock_open_file, mock_getmtime, mock_lancedb_connect,
-                          mock_calc_sim, mock_get_embeddings, mock_preprocess_batch, 
-                          mock_load_img, mock_auto_model, mock_auto_proc, 
-                          mock_listdir, mock_isdir, mock_os_path_exists):
+    def run_cli_with_args(self, args_list,
+                          # Mocks are passed positionally based on MOCK_DECORATORS order
+                          mock_mtcnn_class, # from patch('image_diff.cli.MTCNN')
+                          mock_open_file,   # from patch('builtins.open', ...)
+                          mock_getmtime,
+                          mock_lancedb_connect,
+                          mock_calc_sim,
+                          mock_get_embeddings,
+                          mock_preprocess_batch,
+                          mock_load_img,
+                          mock_auto_model,
+                          mock_auto_proc,
+                          mock_listdir,
+                          mock_isdir,
+                          mock_os_path_exists
+                          ):
         """Helper function to run cli_main with updated mocks."""
         
         # Filesystem & Model Loading Defaults
         mock_os_path_exists.return_value = True 
         mock_isdir.return_value = True      
         mock_listdir.return_value = ['img1.png', 'img2.png'] 
+
         mock_auto_proc_instance = MagicMock()
         mock_auto_proc.return_value = mock_auto_proc_instance
         
         mock_auto_model_instance = MagicMock()
-        # Set a default embedding dimension for the model config
         mock_auto_model_instance.config.hidden_size = 768 
         mock_auto_model.return_value = mock_auto_model_instance
+
+        # MTCNN Mock Setup (if MTCNN is part of this test)
+        self.mock_mtcnn_instance = MagicMock()
+        mock_mtcnn_class.return_value = self.mock_mtcnn_instance
         
         # Image Loading & Processing Defaults
-        mock_pil_image = MagicMock()
-        mock_pil_image.convert.return_value = mock_pil_image
-        mock_load_img.return_value = mock_pil_image
+        mock_pil_image = MagicMock(name="MockPILImage")
+        mock_pil_image.convert.return_value = mock_pil_image # for RGB conversion
+        mock_load_img.return_value = mock_pil_image # load_image returns a PIL image
+
+        # Ensure batch sizes match listdir for embeddings and preprocessing
+        num_images = len(mock_listdir.return_value)
+        mock_preprocess_batch.return_value = torch.randn(num_images, 3, 224, 224)
+        mock_get_embeddings.return_value = torch.randn(num_images, 768)
         
-        mock_preprocess_batch.return_value = torch.randn(len(mock_listdir.return_value), 3, 224, 224) 
-        mock_get_embeddings.return_value = torch.randn(len(mock_listdir.return_value), 768) 
-        mock_calc_sim.return_value = 0.5 
+        mock_calc_sim.return_value = 0.5 # Default similarity
 
         # LanceDB Defaults
         self.mock_db_conn = MagicMock()
@@ -378,6 +396,130 @@ class TestCLI(unittest.TestCase):
             args, kwargs = mock_file_handle.write.call_args
             self.assertIn("Image 1: imgT1.png", args[0])
             self.assertIn("Similarity: 0.98", args[0])
+
+        self._apply_mocks(test_logic)
+
+    # --- Tests for --face-diff ---
+    def test_cli_face_diff_argument_activates_mtcnn(self):
+        def test_logic(mock_mtcnn_class, # This is the new mock from MOCK_DECORATORS
+                       mock_open_file, mock_getmtime, mock_lancedb_connect,
+                       mock_calc_sim, mock_get_embeddings, mock_preprocess_batch,
+                       mock_load_img, mock_auto_model, mock_auto_proc,
+                       mock_listdir, mock_isdir, mock_os_path_exists):
+
+            mock_listdir.return_value = ['face1.png', 'face2.png'] # Ensure enough images for comparison
+            mock_get_embeddings.return_value = torch.randn(2, 768) # Match listdir
+            mock_preprocess_batch.return_value = torch.randn(2, 3, 224, 224)
+
+
+            with patch('image_diff.cli.itertools.combinations', return_value=[]): # No comparisons needed
+                self.run_cli_with_args(['dummy_folder', '--face_diff'],
+                                       mock_mtcnn_class, mock_open_file, mock_getmtime, mock_lancedb_connect,
+                                       mock_calc_sim, mock_get_embeddings, mock_preprocess_batch,
+                                       mock_load_img, mock_auto_model, mock_auto_proc,
+                                       mock_listdir, mock_isdir, mock_os_path_exists)
+
+            mock_mtcnn_class.assert_called_once() # Check if MTCNN constructor was called
+            # Check if load_image was called with mtcnn instance and device
+            # load_image is called for each image in listdir
+            self.assertEqual(mock_load_img.call_count, len(mock_listdir.return_value))
+            for call_args in mock_load_img.call_args_list:
+                args, kwargs = call_args
+                self.assertIsNotNone(kwargs.get('mtcnn') or args[1] if len(args) > 1 else None, "MTCNN instance not passed to load_image")
+                self.assertIsNotNone(kwargs.get('device') or args[2] if len(args) > 2 else None, "Device not passed to load_image")
+
+        self._apply_mocks(test_logic)
+
+    def test_cli_face_diff_uses_different_lancedb_table(self):
+        def test_logic(mock_mtcnn_class, mock_open_file, mock_getmtime, mock_lancedb_connect,
+                       mock_calc_sim, mock_get_embeddings, mock_preprocess_batch,
+                       mock_load_img, mock_auto_model, mock_auto_proc,
+                       mock_listdir, mock_isdir, mock_os_path_exists):
+
+            mock_listdir.return_value = ['f_img1.png', 'f_img2.png']
+            mock_get_embeddings.return_value = torch.randn(2, 768)
+            mock_preprocess_batch.return_value = torch.randn(2, 3, 224, 224)
+
+            # Store original parse_args to spy on its result
+            original_parse_args = argparse.ArgumentParser.parse_args
+            parsed_args_value = None
+            def mock_parse_args_capture(self_parser_instance, args_to_parse=None):
+                nonlocal parsed_args_value
+                actual_args_to_parse = args_to_parse if args_to_parse is not None else sys.argv[1:]
+                parsed_args_value = original_parse_args(self_parser_instance, actual_args_to_parse)
+                return parsed_args_value
+
+            with patch('argparse.ArgumentParser.parse_args', side_effect=mock_parse_args_capture):
+                with patch('image_diff.cli.itertools.combinations', return_value=[]):
+                    self.run_cli_with_args(['dummy_folder', '--face_diff', '--model_name', 'test_model'],
+                                           mock_mtcnn_class, mock_open_file, mock_getmtime, mock_lancedb_connect,
+                                           mock_calc_sim, mock_get_embeddings, mock_preprocess_batch,
+                                           mock_load_img, mock_auto_model, mock_auto_proc,
+                                           mock_listdir, mock_isdir, mock_os_path_exists)
+
+            self.assertIsNotNone(parsed_args_value)
+            self.assertTrue(parsed_args_value.face_diff)
+
+            # Check table name used for creation or opening
+            # Relies on the mock_db_conn setup in run_cli_with_args
+            expected_model_hash = "5f0f88a18655" # md5('test_model')[:12] -> Update if default model changes or test model name changes
+            expected_face_table_name = f"face_embeddings_{expected_model_hash}"
+
+            # Check if create_table was called with the correct face table name
+            if self.mock_db_conn.create_table.called:
+                created_table_name = self.mock_db_conn.create_table.call_args[0][0]
+                self.assertEqual(created_table_name, expected_face_table_name)
+            # Check if open_table was called with the correct face table name
+            elif self.mock_db_conn.open_table.called:
+                opened_table_name = self.mock_db_conn.open_table.call_args[0][0]
+                self.assertEqual(opened_table_name, expected_face_table_name)
+            else:
+                self.fail("Neither create_table nor open_table was called on LanceDB connection.")
+
+        self._apply_mocks(test_logic)
+
+    def test_cli_no_face_diff_uses_default_lancedb_table(self):
+        def test_logic(mock_mtcnn_class, mock_open_file, mock_getmtime, mock_lancedb_connect,
+                       mock_calc_sim, mock_get_embeddings, mock_preprocess_batch,
+                       mock_load_img, mock_auto_model, mock_auto_proc,
+                       mock_listdir, mock_isdir, mock_os_path_exists):
+
+            mock_listdir.return_value = ['nf_img1.png', 'nf_img2.png']
+            mock_get_embeddings.return_value = torch.randn(2, 768)
+            mock_preprocess_batch.return_value = torch.randn(2, 3, 224, 224)
+
+
+            original_parse_args = argparse.ArgumentParser.parse_args
+            parsed_args_value = None
+            def mock_parse_args_capture(self_parser_instance, args_to_parse=None):
+                nonlocal parsed_args_value
+                actual_args_to_parse = args_to_parse if args_to_parse is not None else sys.argv[1:]
+                parsed_args_value = original_parse_args(self_parser_instance, actual_args_to_parse)
+                return parsed_args_value
+
+            with patch('argparse.ArgumentParser.parse_args', side_effect=mock_parse_args_capture):
+                with patch('image_diff.cli.itertools.combinations', return_value=[]):
+                    self.run_cli_with_args(['dummy_folder', '--model_name', 'test_model_no_face'],
+                                           mock_mtcnn_class, mock_open_file, mock_getmtime, mock_lancedb_connect,
+                                           mock_calc_sim, mock_get_embeddings, mock_preprocess_batch,
+                                           mock_load_img, mock_auto_model, mock_auto_proc,
+                                           mock_listdir, mock_isdir, mock_os_path_exists)
+
+            self.assertIsNotNone(parsed_args_value)
+            self.assertFalse(parsed_args_value.face_diff)
+            mock_mtcnn_class.assert_not_called() # MTCNN should not be initialized
+
+            expected_model_hash = "db8c19485907" # md5('test_model_no_face')[:12]
+            expected_image_table_name = f"image_embeddings_{expected_model_hash}"
+
+            if self.mock_db_conn.create_table.called:
+                created_table_name = self.mock_db_conn.create_table.call_args[0][0]
+                self.assertEqual(created_table_name, expected_image_table_name)
+            elif self.mock_db_conn.open_table.called:
+                opened_table_name = self.mock_db_conn.open_table.call_args[0][0]
+                self.assertEqual(opened_table_name, expected_image_table_name)
+            else:
+                self.fail("Neither create_table nor open_table was called on LanceDB connection for image diff.")
 
         self._apply_mocks(test_logic)
 

@@ -5,11 +5,12 @@ A command-line tool to find similar images within a folder. It compares images p
 
 ## Features
 *   Pairwise image comparison in a specified folder.
+*   **NEW:** Optional face detection mode to compare detected faces within images instead of whole images.
 *   Supports PNG and JPG/JPEG image formats.
-*   Uses Hugging Face transformer models for feature extraction.
+*   Uses Hugging Face transformer models for feature extraction (for both whole images and detected faces).
 *   Allows user selection of any compatible model from Hugging Face Hub or a local path.
 *   Adjustable similarity threshold.
-*   Persistent embedding storage using LanceDB within the target image folder (`<folder_path>/.lancedb/`), reducing re-computation on subsequent runs.
+*   Persistent embedding storage using LanceDB within the target image folder (`<folder_path>/.lancedb/`). Embeddings for whole images and faces are stored separately to avoid conflicts, reducing re-computation on subsequent runs.
 *   Outputs results to console and optionally to a file (CSV, JSON, or TXT).
 
 ## Requirements
@@ -64,9 +65,30 @@ image-diff <folder_path> [options]
     *   `.json`: JSON array of objects.
     *   Other/No extension: Plain text.
     *   Default: `similar_pairs.csv`.
+*   `--face_diff`: (Optional) If specified, enables face detection mode. The tool will attempt to detect faces in each image and compare these faces. If no face is detected in an image, the whole image might be used as a fallback (current behavior, with a warning logged).
 
 ### Examples
-1.  Compare images in a folder named `my_images` using default settings (output to `similar_pairs.csv`):
+1.  Compare whole images in a folder named `my_images` using default settings (output to `similar_pairs.csv`):
+    ```bash
+    image-diff ./my_images
+    ```
+
+2.  **NEW:** Compare detected faces in images in `my_images` and save to `face_results.json`:
+    ```bash
+    image-diff ./my_images --face_diff --output_file face_results.json
+    ```
+
+3.  Compare whole images with a custom threshold and save to a JSON file:
+    ```bash
+    image-diff ./my_images --threshold 0.85 --output_file results.json
+    ```
+
+4.  Compare detected faces using a different model and a specific threshold:
+    ```bash
+    image-diff ./my_images --face_diff --model_name 'facebook/dinov2-base' --threshold 0.92
+    ```
+
+5.  Compare whole images using a different model and save to a text file:
     ```bash
     image-diff ./my_images
     ```
@@ -83,19 +105,33 @@ image-diff <folder_path> [options]
 
 ## How it Works
 1.  The tool scans the target folder (specified by `folder_path`) for images with `.png`, `.jpg`, or `.jpeg` extensions.
-2.  For each image, its modification time is checked. If a valid embedding for the current model exists in the local LanceDB store (`<folder_path>/.lancedb/`) and the image hasn't changed, the stored embedding is used.
-3.  Otherwise, if the image is new or modified, it's loaded, preprocessed, and its feature embedding is computed using the selected vision transformer model.
-4.  Newly computed embeddings are stored or updated in the model-specific LanceDB table within the `<folder_path>/.lancedb/` directory for future runs.
-5.  Once all necessary embeddings are retrieved or computed, the tool iterates through all unique pairs of valid images. For each pair:
-    a.  The cosine similarity is calculated between their embeddings. This score indicates how similar the images are in terms of the features learned by the model.
-    b.  If the calculated similarity score is greater than or equal to the specified `--threshold`, the pair is reported.
-6.  Results (similar pairs and their scores) are printed to the console and saved to the file specified by `--output_file` (defaulting to `similar_pairs.csv`).
+2.  **Operating Mode:**
+    *   **Default (Image Diff):** The entire image is processed.
+    *   **Face Diff (`--face_diff`):** The tool first attempts to detect faces using an MTCNN model. If faces are found, the largest detected face (current strategy, may evolve) is used for embedding. If no faces are detected in an image, the tool falls back to using the whole image for that specific file, and a warning is logged.
+3.  For each image (or detected face):
+    *   Its modification time (of the original file) is checked.
+    *   If a valid embedding for the current vision model and operating mode (image vs. face) exists in the local LanceDB store (`<folder_path>/.lancedb/`) and the image hasn't changed, the stored embedding is used. LanceDB tables are named differently for image embeddings vs. face embeddings to prevent conflicts (e.g., `image_embeddings_<model_hash>` vs. `face_embeddings_<model_hash>`).
+4.  Otherwise, if the image (or face) is new or the original file is modified:
+    *   It's loaded (and cropped if in face mode and a face is found).
+    *   It's preprocessed.
+    *   Its feature embedding is computed using the selected vision transformer model.
+5.  Newly computed embeddings are stored or updated in the appropriate model-specific and mode-specific LanceDB table.
+6.  Once all necessary embeddings are retrieved or computed, the tool iterates through all unique pairs of valid items (images or faces). For each pair:
+    a.  The cosine similarity is calculated between their embeddings. This score indicates how similar they are in terms of the features learned by the vision model.
+    b.  If the calculated similarity score is greater than or equal to the specified `--threshold`, the pair of original image filenames is reported.
+7.  Results (similar pairs and their scores) are printed to the console and saved to the file specified by `--output_file` (defaulting to `similar_pairs.csv`).
 
 ## Note on Models
-The default model is `google/vit-base-patch16-224-in21k`. You can use other models from the Hugging Face Hub that are suitable for image feature extraction (e.g., other Vision Transformer (ViT) variants, DeiT, DINOv2, etc.). Ensure the chosen model is compatible with `AutoModel` and `AutoImageProcessor` from the `transformers` library for image feature extraction tasks.
-The LanceDB storage is model-specific, meaning embeddings generated by different models are stored separately.
 
-When you use a new model name from Hugging Face Hub for the first time, the tool will download the model weights and configuration. This may take some time depending on the model size and your internet connection. Subsequent uses of the same model will load it from the local cache.
+### Vision Transformer Models
+The default model for feature extraction is `google/vit-base-patch16-224-in21k`. You can use other models from the Hugging Face Hub that are suitable for image feature extraction (e.g., other Vision Transformer (ViT) variants, DeiT, DINOv2, etc.). Ensure the chosen model is compatible with `AutoModel` and `AutoImageProcessor` from the `transformers` library.
+
+The LanceDB storage for embeddings is specific to both the chosen vision model and the operating mode (whole image vs. face). This means embeddings generated by different models or for different modes are stored separately, preventing conflicts and ensuring correct caching.
+
+When you use a new vision model name from Hugging Face Hub for the first time, the tool will download its weights and configuration. This may take some time depending on the model size and your internet connection. Subsequent uses of the same model will load it from the local Hugging Face cache.
+
+### Face Detection Model
+When `--face_diff` mode is active, the tool uses an MTCNN (Multi-task Cascaded Convolutional Networks) model for face detection, provided by the `facenet-pytorch` library (which is a port of MTCNN). This model is generally effective for detecting faces under various conditions. The first time you run with `--face_diff`, the MTCNN model weights might also be downloaded if not already cached by `facenet-pytorch`.
 
 ### Performance Considerations & Model Choice
 

@@ -5,6 +5,7 @@ import logging # Added
 # UnidentifiedImageError import removed
 import torch
 from transformers import AutoImageProcessor, AutoModel
+from facenet_pytorch import MTCNN # Added for face detection
 import hashlib
 import lancedb
 import pyarrow as pa
@@ -35,6 +36,11 @@ def main():
         type=str,
         default="similar_pairs.csv", # Default to CSV
         help="Path to save the results of similar pairs. E.g., similar_pairs.csv or similar_pairs.json",
+    )
+    parser.add_argument(
+        "--face_diff",
+        action="store_true",
+        help="Enable face detection mode. Compares detected faces instead of whole images.",
     )
 
     logging_group = parser.add_argument_group('Logging Options')
@@ -120,14 +126,44 @@ def main():
         logger.error(f"Error loading model or processor '{args.model_name}': {e}. Check model name or network connection.")
         return
 
-    # LanceDB Initialization
+    # Model and Processor Loading
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger.info(f"Using device: {device}")
+    try:
+        logger.info(f"Loading image processor for '{args.model_name}'...")
+        processor = AutoImageProcessor.from_pretrained(args.model_name)
+        logger.info(f"Loading model '{args.model_name}'...")
+        model = AutoModel.from_pretrained(args.model_name)
+        model.eval()
+        model.to(device)
+        logger.info("Model and processor loaded successfully and moved to device.")
+    except Exception as e: # Catch broad errors from transformers loading
+        logger.error(f"Error loading model or processor '{args.model_name}': {e}. Check model name or network connection.")
+        return
+
+    mtcnn = None
+    if args.face_diff:
+        try:
+            logger.info("Face diff mode enabled. Loading MTCNN face detection model...")
+            # MTCNN can be configured with various options, using defaults here.
+            # It will automatically use `device`.
+            mtcnn = MTCNN(keep_all=True, device=device, select_largest=False) # keep_all=True to get all faces initially if needed for other strategies
+            logger.info("MTCNN model loaded successfully.")
+        except Exception as e:
+            logger.error(f"Error loading MTCNN model: {e}. Face detection will not be available.")
+            return # Or allow fallback to image_diff? For now, exit if face_diff is requested but MTCNN fails.
+
     # LanceDB Initialization
     db_uri = os.path.join(args.folder_path, ".lancedb")
     db = lancedb.connect(db_uri)
     model_hash = hashlib.md5(args.model_name.encode()).hexdigest()[:12]
-    table_name = f"image_embeddings_{model_hash}"
-    logger.info(f"Using LanceDB URI: {db_uri}") # Early logging
-    logger.info(f"Target LanceDB table name: {table_name}") # Early logging
+
+    # Modify table name based on face_diff flag
+    table_prefix = "face_embeddings" if args.face_diff else "image_embeddings"
+    table_name = f"{table_prefix}_{model_hash}"
+
+    logger.info(f"Using LanceDB URI: {db_uri}")
+    logger.info(f"Target LanceDB table name: {table_name}")
 
     try:
         existing_tables = db.table_names()
@@ -188,9 +224,24 @@ def main():
 
         if not found_in_db:
             try:
-                pil_image = load_image(img_path)
-                paths_for_computation.append(img_path)
-                pils_for_computation.append(pil_image)
+                # Pass mtcnn and device to load_image if face_diff is enabled
+                pil_image_or_face = load_image(img_path, mtcnn if args.face_diff else None, device if args.face_diff else None)
+
+                # Check if the returned image is the original image due to no face being detected in face_diff mode
+                if args.face_diff and mtcnn:
+                    # A simple check: if load_image returned the original image path (it doesn't, it returns PIL)
+                    # We need a better way to check if fallback occurred.
+                    # For now, we assume load_image returns a face if one is found, or original PIL if not.
+                    # The image_utils.load_image was modified to return original if no face.
+                    # We can log a more specific message here if needed, or rely on image_utils logs.
+                    # Let's refine this: if the image returned by load_image is the same as one loaded without mtcnn,
+                    # it implies no face was used or found.
+                    # This check is tricky. For now, we trust load_image to do its job and log internally if needed.
+                    # The key is that `pil_image_or_face` is what gets processed.
+                    pass # No special handling here, image_utils did the work.
+
+                paths_for_computation.append(img_path) # Still use original path for tracking
+                pils_for_computation.append(pil_image_or_face) # Use the potentially cropped face
             except IOError as e: # UnidentifiedImageError is a subclass of IOError
                 logger.warning(f"WARNING_IMAGE_LOAD_ERROR: Skipping image {basename} due to loading error: {e}")
             except Exception as e:
@@ -263,7 +314,8 @@ def main():
     # Prepare for Comparison
     valid_image_paths_for_comparison = list(processed_image_data.keys())
     if len(valid_image_paths_for_comparison) < 2:
-        logger.error(f"Not enough valid embeddings ({len(valid_image_paths_for_comparison)}) available for comparison. Exiting.")
+        message_type = "face embeddings" if args.face_diff else "image embeddings"
+        logger.error(f"Not enough valid {message_type} ({len(valid_image_paths_for_comparison)}) available for comparison. Exiting.")
         return
     
     all_embeddings_list = [processed_image_data[path]['embedding'] for path in valid_image_paths_for_comparison]
@@ -272,7 +324,8 @@ def main():
     # Similarity Calculation Loop
     similar_pairs_found = 0
     similar_pairs_data = [] # For storing output
-    logger.info("Calculating similarities and comparing pairs...")
+    comparison_type_msg = "face similarities" if args.face_diff else "image similarities"
+    logger.info(f"Calculating {comparison_type_msg} and comparing pairs...")
     for i, j in itertools.combinations(range(len(valid_image_paths_for_comparison)), 2):
         img_path1 = valid_image_paths_for_comparison[i]
         img_path2 = valid_image_paths_for_comparison[j]
